@@ -147,7 +147,7 @@ def run_pipeline():
         placeholders = ",".join("?" for _ in job_ids)
         conn.execute(
             f"UPDATE biotech_jobs SET emailed = 1 WHERE id IN ({placeholders})",
-            job_ids,
+            tuple(job_ids),
         )
         conn.commit()
         print(f"Successfully sent {len(rows)} jobs to {RECIPIENT}")
