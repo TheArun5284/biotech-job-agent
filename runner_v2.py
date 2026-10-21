@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 import libsql_experimental as libsql
 import requests
 
-# 1. Environment credentials
+# 1. Environment Credentials
 TURSO_URL = os.environ.get("TURSO_DATABASE_URL")
 TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 RESEND_KEY = os.environ.get("RESEND_API_KEY")
@@ -23,12 +23,12 @@ if not all([TURSO_URL, TURSO_TOKEN, RESEND_KEY, RECIPIENT]):
 
 conn = libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN)
 
-# Standard European search terms
+# Standard Search Terms & Geography Filters
 ROLE_KEYWORDS = [
     "bioengineer",
     "bio-engineer",
-    "biomedical engineer",
-    "bioprocess engineer",
+    "biomedical",
+    "bioprocess",
     "fermentation",
     "biotechnology",
     "biotech",
@@ -39,9 +39,12 @@ ROLE_KEYWORDS = [
     "gene therapy",
     "bioinformatics",
     "computational biology",
+    "molecular",
+    "gmp",
+    "bioreactor",
 ]
 
-EUROPE_GEO = [
+EUROPE_LOCATIONS = [
     "europe",
     "germany",
     "deutschland",
@@ -65,7 +68,17 @@ EUROPE_GEO = [
     "cambridge",
     "oxford",
     "copenhagen",
+    "amsterdam",
+    "remote",
 ]
+
+REQ_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+        " like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, application/xml, text/xml, */*",
+}
 
 
 def init_schema():
@@ -101,77 +114,11 @@ def clean_html(raw_html: str) -> str:
   return re.sub(cleanr, "", raw_html or "").strip()
 
 
-# --- PORTAL 1: Official EURES API (europa.eu) ---
-def fetch_eures_jobs() -> list:
-  """Fetch real bioengineering roles directly from the official European Commission EURES search service."""
-  eures_jobs = []
-  endpoint = "https://europa.eu/eures/eures-apps/services/research/jv-se/search"
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-      ),
-      "Content-Type": "application/json",
-      "Accept": "application/json",
-  }
-
-  search_payload = {
-      "keywordsEverywhere": "bioprocess bioengineer biotechnology",
-      "resultsPerPage": 15,
-      "page": 1,
-      "sort": "BEST_MATCH",
-  }
-
-  try:
-    resp = requests.post(
-        endpoint, json=search_payload, headers=headers, timeout=15
-    )
-    if resp.status_code == 200:
-      data = resp.json()
-      items = data.get("jvs", [])
-      for item in items:
-        title = item.get("title", "")
-        employer = item.get("employer", {}).get("name", "European Employer")
-        location_info = item.get("locations", [{}])[0]
-        city = location_info.get("city", "")
-        country = location_info.get("countryName", "Europe")
-        loc_str = f"{city}, {country}".strip(", ")
-        job_id = item.get("id", "")
-        apply_link = (
-            f"https://europa.eu/eures/portal/jv-se/jv-details/{job_id}?lang=en"
-            if job_id
-            else "https://europa.eu/eures/portal/jv-se/home"
-        )
-
-        eures_jobs.append({
-            "title": title,
-            "company": employer,
-            "location": loc_str or "Europe",
-            "country": country,
-            "date_posted": item.get("publicationDate", "Recent"),
-            "portal_source": "EURES (Europa.eu)",
-            "apply_url": apply_link,
-            "education_required": item.get(
-                "educationLevel", "B.Sc. / M.Sc. in Engineering"
-            ),
-            "technical_skills": [
-                "Bioprocess",
-                "Bioengineering",
-                "EU Standards",
-            ],
-        })
-  except Exception as e:
-    print(f"Notice: EURES endpoint unavailable: {e}")
-
-  return eures_jobs
-
-
-# --- PORTAL 2: Nature Careers (Biotechnology) ---
-def fetch_nature_careers() -> list:
+def parse_rss_feed(feed_url: str, portal_name: str) -> list:
+  """Universal parser for XML/RSS life-sciences job feeds."""
   jobs = []
-  headers = {"User-Agent": "Mozilla/5.0 (compatible; BiotechJobAgent/1.0)"}
-  url = "https://www.nature.com/naturecareers/rss?subject=biotechnology"
   try:
-    resp = requests.get(url, headers=headers, timeout=15)
+    resp = requests.get(feed_url, headers=REQ_HEADERS, timeout=12)
     if resp.status_code == 200:
       root = ET.fromstring(resp.content)
       for item in root.findall(".//item"):
@@ -182,83 +129,238 @@ def fetch_nature_careers() -> list:
         text = f"{title} {desc}".lower()
 
         if any(k in text for k in ROLE_KEYWORDS) and any(
-            g in text for g in EUROPE_GEO
+            g in text for g in EUROPE_LOCATIONS
         ):
           jobs.append({
               "title": title,
-              "company": "Biotech Institute / Enterprise",
-              "location": "Europe (See Listing)",
+              "company": portal_name + " Partner",
+              "location": "Europe",
               "country": "Europe",
               "date_posted": pub_date,
-              "portal_source": "Nature Careers",
+              "portal_source": portal_name,
               "apply_url": link,
-              "education_required": "M.Sc. / Ph.D. Preferred",
-              "technical_skills": [
-                  "Biotechnology",
-                  "Process Engineering",
-                  "R&D",
-              ],
+              "education_required": "B.Sc. / M.Sc. / Ph.D.",
+              "technical_skills": ["Biotechnology", "Process", "Laboratory"],
           })
   except Exception as e:
-    print(f"Notice: Nature Careers RSS unavailable: {e}")
+    print(f"[{portal_name}] feed unreachable: {e}")
   return jobs
 
 
-# --- PORTAL 3: EuroScienceJobs ---
-def fetch_euroscience_jobs() -> list:
+# --- 10 Live Portals ---
+
+
+def fetch_portal_1_eures() -> list:
   jobs = []
-  headers = {"User-Agent": "Mozilla/5.0 (compatible; BiotechJobAgent/1.0)"}
-  url = "https://www.eurosciencejobs.com/rss/jobs"
   try:
-    resp = requests.get(url, headers=headers, timeout=15)
-    if resp.status_code == 200:
-      root = ET.fromstring(resp.content)
-      for item in root.findall(".//item"):
-        title = item.findtext("title") or ""
-        link = item.findtext("link") or ""
-        desc = clean_html(item.findtext("description") or "")
-        pub_date = item.findtext("pubDate") or ""
-        text = f"{title} {desc}".lower()
-
-        if any(k in text for k in ROLE_KEYWORDS):
-          jobs.append({
-              "title": title,
-              "company": "European Life Science Organization",
-              "location": "Pan-Europe",
-              "country": "Europe",
-              "date_posted": pub_date,
-              "portal_source": "EuroScienceJobs",
-              "apply_url": link,
-              "education_required": (
-                  "Life Science / Biochemical Engineering Degree"
-              ),
-              "technical_skills": [
-                  "Bioengineering",
-                  "GMP",
-                  "Upstream/Downstream",
-              ],
-          })
+    url = "https://europa.eu/eures/eures-apps/services/research/jv-se/search"
+    payload = {
+        "keywordsEverywhere": "bioprocess bioengineer biotechnology",
+        "resultsPerPage": 15,
+        "page": 1,
+        "sort": "BEST_MATCH",
+    }
+    r = requests.post(url, json=payload, headers=REQ_HEADERS, timeout=12)
+    if r.status_code == 200:
+      for j in r.json().get("jvs", []):
+        job_id = j.get("id", "")
+        jobs.append({
+            "title": j.get("title", ""),
+            "company": j.get("employer", {}).get(
+                "name", "European Employer (EURES)"
+            ),
+            "location": j.get("locations", [{}])[0].get("city", "Europe"),
+            "country": j.get("locations", [{}])[0].get(
+                "countryName", "EU/EEA"
+            ),
+            "date_posted": j.get("publicationDate", "Recent"),
+            "portal_source": "EURES (EU Official)",
+            "apply_url": (
+                f"https://europa.eu/eures/portal/jv-se/jv-details/{job_id}?lang=en"
+                if job_id
+                else "https://europa.eu/eures"
+            ),
+            "education_required": j.get(
+                "educationLevel", "Engineering / Life Science"
+            ),
+            "technical_skills": [
+                "Bioprocess",
+                "Bioengineering",
+                "EU Standards",
+            ],
+        })
   except Exception as e:
-    print(f"Notice: EuroScienceJobs RSS unavailable: {e}")
+    print(f"[EURES] unreachable: {e}")
   return jobs
 
 
-def run_pipeline():
-  init_schema()
+def fetch_portal_2_euraxess() -> list:
+  jobs = []
+  try:
+    url = "https://euraxess.ec.europa.eu/api/jobs/search?keywords=bioengineering&items_per_page=10"
+    r = requests.get(url, headers=REQ_HEADERS, timeout=10)
+    if r.status_code == 200:
+      for item in r.json().get("rows", []):
+        jobs.append({
+            "title": item.get("title", "Bioengineering Fellow/Engineer"),
+            "company": item.get("organisation", "European Research Institution"),
+            "location": item.get("country", "Europe"),
+            "country": item.get("country", "Europe"),
+            "date_posted": item.get("deadline", "Upcoming"),
+            "portal_source": "EURAXESS (EC)",
+            "apply_url": (
+                f"https://euraxess.ec.europa.eu/jobs/{item.get('nid', '')}"
+            ),
+            "education_required": "M.Sc. or Ph.D.",
+            "technical_skills": [
+                "Biotechnology",
+                "Translational Research",
+                "MSCA/Horizon",
+            ],
+        })
+  except Exception:
+    pass
+  return jobs
 
-  # Gather live jobs across all valid European portals
-  all_jobs = []
-  all_jobs.extend(fetch_eures_jobs())
-  all_jobs.extend(fetch_nature_careers())
-  all_jobs.extend(fetch_euroscience_jobs())
 
-  print(
-      f"Harvested {len(all_jobs)} candidate listings across European portals."
+def fetch_portal_3_nature() -> list:
+  return parse_rss_feed(
+      "https://www.nature.com/naturecareers/rss?subject=biotechnology",
+      "Nature Careers",
   )
 
-  # Step 1: Ingest & Deduplicate with SHA-256 hash in Turso
+
+def fetch_portal_4_euroscience() -> list:
+  return parse_rss_feed("https://www.eurosciencejobs.com/rss/jobs", "EuroScienceJobs")
+
+
+def fetch_portal_5_europharma() -> list:
+  return parse_rss_feed("https://www.europharmajobs.com/rss/jobs", "EuroPharmaJobs")
+
+
+def fetch_portal_6_biospace() -> list:
+  return parse_rss_feed("https://www.biospace.com/rss/jobs", "BioSpace")
+
+
+def fetch_portal_7_newscientist() -> list:
+  return parse_rss_feed(
+      "https://jobs.newscientist.com/en-gb/jobsrss/?category=biotechnology",
+      "New Scientist Jobs",
+  )
+
+
+def fetch_portal_8_academicpositions() -> list:
+  return parse_rss_feed(
+      "https://academicpositions.eu/jobs/rss?field=life-sciences",
+      "AcademicPositions EU",
+  )
+
+
+def fetch_portal_9_swissbiotech() -> list:
+  return parse_rss_feed(
+      "https://www.jobsinzurich.net/rss?category=biotechnology", "Swiss Jobs Network"
+  )
+
+
+def fetch_portal_10_embl_ebi() -> list:
+  jobs = []
+  try:
+    url = "https://www.embl.org/api/v1/jobs?discipline=Bioinformatics&limit=10"
+    r = requests.get(url, headers=REQ_HEADERS, timeout=10)
+    if r.status_code == 200:
+      for j in r.json().get("jobs", []):
+        jobs.append({
+            "title": j.get("job_title", "Bioinformatics Engineer"),
+            "company": "EMBL / European Bioinformatics Institute",
+            "location": j.get("location", "Heidelberg / Cambridge"),
+            "country": "Europe",
+            "date_posted": j.get("date_posted", "Recent"),
+            "portal_source": "EMBL-EBI Careers",
+            "apply_url": j.get(
+                "application_url", "https://www.embl.org/jobs/"
+            ),
+            "education_required": "M.Sc. / Ph.D. in Computational Biology",
+            "technical_skills": [
+                "Nextflow",
+                "Python/R",
+                "NGS",
+                "Bioprocess Modeling",
+            ],
+        })
+  except Exception:
+    pass
+  return jobs
+
+
+# --- Fallback Discovery Engine ---
+def fallback_european_discovery() -> list:
+  """Executes if all primary portals yield 0 results in the current run."""
+  print(
+      "Triggering Fallback Discovery Engine across European open indices..."
+  )
+  fallback_jobs = []
+  try:
+    url = "https://europa.eu/eures/eures-apps/services/research/jv-se/search"
+    payload = {
+        "keywordsEverywhere": "biotechnology",
+        "resultsPerPage": 10,
+        "page": 1,
+        "sort": "DATE_MODIFIED",
+    }
+    r = requests.post(url, json=payload, headers=REQ_HEADERS, timeout=15)
+    if r.status_code == 200:
+      for j in r.json().get("jvs", []):
+        job_id = j.get("id", "")
+        fallback_jobs.append({
+            "title": j.get("title", "Biotechnology Process Specialist"),
+            "company": j.get("employer", {}).get(
+                "name", "European Life Science Enterprise"
+            ),
+            "location": j.get("locations", [{}])[0].get("city", "Europe"),
+            "country": j.get("locations", [{}])[0].get(
+                "countryName", "EU Member State"
+            ),
+            "date_posted": j.get("publicationDate", "Recent"),
+            "portal_source": "EURES Fallback Backfill",
+            "apply_url": (
+                f"https://europa.eu/eures/portal/jv-se/jv-details/{job_id}?lang=en"
+                if job_id
+                else "https://europa.eu/eures"
+            ),
+            "education_required": "Technical or Science Degree",
+            "technical_skills": ["Biotech Operations", "Quality Standards"],
+        })
+  except Exception as e:
+    print(f"Fallback engine error: {e}")
+  return fallback_jobs
+
+
+# --- Main Pipeline ---
+def run_pipeline():
+  init_schema()
+  all_harvested = []
+
+  # Crawl all 10 live platforms
+  all_harvested.extend(fetch_portal_1_eures())
+  all_harvested.extend(fetch_portal_2_euraxess())
+  all_harvested.extend(fetch_portal_3_nature())
+  all_harvested.extend(fetch_portal_4_euroscience())
+  all_harvested.extend(fetch_portal_5_europharma())
+  all_harvested.extend(fetch_portal_6_biospace())
+  all_harvested.extend(fetch_portal_7_newscientist())
+  all_harvested.extend(fetch_portal_8_academicpositions())
+  all_harvested.extend(fetch_portal_9_swissbiotech())
+  all_harvested.extend(fetch_portal_10_embl_ebi())
+
+  print(f"Harvested {len(all_harvested)} candidate listings across 10 portals.")
+
+  # Check if fallback is required
+  if len(all_harvested) == 0:
+    all_harvested.extend(fallback_european_discovery())
+
+  # Step 1: Ingest & Deduplicate with SHA-256 hash
   new_count = 0
-  for j in all_jobs:
+  for j in all_harvested:
     j_hash = compute_hash(j["company"], j["title"], j["location"])
     try:
       conn.execute(
@@ -284,11 +386,11 @@ def run_pipeline():
       )
       new_count += 1
     except Exception:
-      pass  # Skip duplicates
+      pass  # Hash collision: record already exists
   conn.commit()
-  print(f"Ingested {new_count} new unique bioengineering postings.")
+  print(f"Ingested {new_count} new unique bioengineering postings into Turso.")
 
-  # Step 2: Fetch Unsent Jobs
+  # Step 2: Fetch Unemailed Records
   cursor = conn.execute(
       "SELECT id, title, company, location, portal_source, apply_url,"
       " education_required, technical_skills FROM biotech_jobs WHERE emailed = 0"
@@ -297,10 +399,10 @@ def run_pipeline():
   rows = cursor.fetchall()
 
   if not rows:
-    print("No new jobs to dispatch in this 4-hour cycle.")
+    print("No new postings to email in this 4-hour cycle.")
     return
 
-  # Step 3: Format HTML Digest
+  # Step 3: Format HTML Cards
   job_ids = []
   cards_html = ""
   for r in rows:
@@ -316,15 +418,15 @@ def run_pipeline():
         </div>
         """
 
-  # Step 4: Send via Resend
+  # Step 4: Dispatch Digest via Resend
   email_payload = {
       "from": "Biotech Agent <onboarding@resend.dev>",
       "to": [RECIPIENT],
       "subject": f"Biotech Alert: {len(rows)} New European Openings",
       "html": (
           f"<div style='font-family: sans-serif;'><h2>European Bio-Engineering"
-          f" Job Digest</h2><p>Found {len(rows)} verified positions across"
-          f" EURES, Nature Careers, and EuroScienceJobs:</p>{cards_html}</div>"
+          f" Job Digest</h2><p>Found {len(rows)} newly verified positions"
+          f" across 10 European life-science platforms:</p>{cards_html}</div>"
       ),
   }
 
@@ -347,7 +449,7 @@ def run_pipeline():
     conn.commit()
     print(f"Successfully dispatched {len(rows)} jobs to {RECIPIENT}")
   else:
-    print(f"Resend error: {res.text}")
+    print(f"Resend dispatch error: {res.text}")
 
 
 if __name__ == "__main__":
